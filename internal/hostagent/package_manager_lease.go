@@ -34,6 +34,9 @@ func configurePackageManagers(platform string, updates *packageUpdateManager, cl
 	lease := newPackageManagerLease()
 	if updates == nil {
 		updates = newPackageUpdateManager(platform, lease)
+		// The collector reports the read-only simulation outside typed-action
+		// containment; see packageUpdateManager.inspect.
+		updates.inspect = runPackageInspectionCommand
 	} else {
 		updates.lease = lease
 	}

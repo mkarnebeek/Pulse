@@ -2977,7 +2977,14 @@ so Pulse must re-plan against the widened or changed set. A reboot-required
 marker is reported as state, never acted upon by this capability. Generic
 agent command execution, Patrol prose, lifecycle UI, and external agents must
 not reconstruct or bypass this typed operation.
-Every fixed-catalog package and Proxmox guest invocation runs inside a
+The collector runs that report-only simulation itself: exactly
+`apt-get -s -o Debug::NoLocking=1 upgrade`, with a fixed environment and capped
+output (`runPackageInspectionCommand`). Typed-action containment needs the
+runner's environment and `pulse-agent-runner.service`, which a collector does
+not have; the runner's preflight and read-after-write simulations stay
+contained.
+Every other fixed-catalog package invocation, and every Proxmox guest
+invocation, runs inside a
 cryptographically named transient systemd service. PID 1 starts a hidden
 runner launcher that revalidates the closed tool/argument/environment catalog,
 mirrors the runner sandbox, caps output, and records direct-process and cgroup

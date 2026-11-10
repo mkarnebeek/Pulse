@@ -47,7 +47,8 @@ func TestConfigurePackageManagersInjectsOneSharedLeaseAndSerializesRefresh(t *te
 	cleanup.lookPath = func(string) (string, error) { return "/usr/bin/apt-get", nil }
 	entered := make(chan struct{})
 	releaseUpdate := make(chan struct{})
-	updates.run = func(context.Context, []string, string, ...string) packageUpdateCommandResult {
+	// The collector's refresh runs its simulation through inspect.
+	updates.inspect = func(context.Context, []string, string, ...string) packageUpdateCommandResult {
 		close(entered)
 		<-releaseUpdate
 		return packageUpdateCommandResult{}

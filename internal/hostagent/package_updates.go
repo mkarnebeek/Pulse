@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -25,6 +27,10 @@ var (
 	packageUpdateStat     = os.Stat
 )
 
+// aptSimulateUpgradeArgs is the read-only APT simulation behind both the
+// reported package count and the preflight/verification inventory.
+var aptSimulateUpgradeArgs = []string{"-s", "-o", "Debug::NoLocking=1", "upgrade"}
+
 // packageUpdateManager owns both host package telemetry and the only command
 // catalog allowed to mutate OS packages. Callers select a typed operation;
 // package-manager commands and flags never cross the network boundary.
@@ -33,6 +39,12 @@ type packageUpdateManager struct {
 	now      func() time.Time
 	cacheTTL time.Duration
 	run      func(context.Context, []string, string, ...string) packageUpdateCommandResult
+	// inspect, when set, runs the read-only APT simulation instead of run.
+	// The collector sets it: typed-action containment needs the action
+	// runner's environment and pulse-agent-runner.service, which a collector
+	// does not have, so a contained simulation always fails there. The
+	// action runner leaves it nil and keeps its simulations contained.
+	inspect  func(context.Context, []string, string, ...string) packageUpdateCommandResult
 	lookPath func(string) (string, error)
 	stat     func(string) (os.FileInfo, error)
 	lease    *packageManagerLease
@@ -113,7 +125,11 @@ func (m *packageUpdateManager) snapshotLocked(ctx context.Context, force bool) a
 
 	snapshot.Supported = true
 	snapshot.Manager = "apt"
-	result := m.run(ctx, nil, "apt-get", "-s", "-o", "Debug::NoLocking=1", "upgrade")
+	simulate := m.run
+	if m.inspect != nil {
+		simulate = m.inspect
+	}
+	result := simulate(ctx, nil, "apt-get", aptSimulateUpgradeArgs...)
 	if result.err != nil || result.exitCode != 0 {
 		snapshot.Error = "package update inspection failed"
 		snapshot.RebootRequired = m.hostRebootRequired()
@@ -290,6 +306,40 @@ func runPackageUpdateCommand(ctx context.Context, env []string, name string, arg
 	return packageUpdateCommandResult{
 		stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, err: result.err,
 	}
+}
+
+var errPackageInspectionInvocation = errors.New("package inspection accepts only the read-only APT upgrade simulation")
+
+// runPackageInspectionCommand runs the collector's read-only APT simulation
+// directly, with a fixed environment and capped output. It accepts exactly
+// that one invocation, so it cannot become a path for package mutation.
+func runPackageInspectionCommand(ctx context.Context, env []string, name string, args ...string) packageUpdateCommandResult {
+	if len(env) != 0 || name != "apt-get" || !slices.Equal(args, aptSimulateUpgradeArgs) {
+		return packageUpdateCommandResult{exitCode: -1, err: errPackageInspectionInvocation}
+	}
+	path, err := packageUpdateLookPath(name)
+	if err != nil {
+		return packageUpdateCommandResult{exitCode: -1, err: err}
+	}
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C"}
+	cmd.Dir = "/"
+	cmd.WaitDelay = 5 * time.Second
+	stdout := newCappedBuffer(maxCommandOutputSize)
+	stderr := newCappedBuffer(maxCommandOutputSize)
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	err = cmd.Run()
+	result := packageUpdateCommandResult{stdout: stdout.String(), stderr: stderr.String(), err: err}
+	if err == nil {
+		return result
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		result.exitCode = exitErr.ExitCode()
+	} else {
+		result.exitCode = -1
+	}
+	return result
 }
 
 func parseAPTSimulatedUpgrades(output string) []agentexec.HostPackageUpdate {
